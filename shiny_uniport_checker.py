@@ -61,8 +61,10 @@ def get_features_detailed(uniprot_id: str, start: int, end: int) -> dict:
         Dictionary containing:
             - uniprot_id: The queried UniProt ID
             - protein_name: Full protein name
+            - protein_length: Total length of the protein sequence
             - region: String representation of the queried region
             - features: List of dicts with keys: type, description, start, end
+            - all_features: List of ALL features (for full protein view)
     
     Raises:
         ValueError: If the UniProt entry cannot be fetched
@@ -74,6 +76,10 @@ def get_features_detailed(uniprot_id: str, start: int, end: int) -> dict:
     
     data = r.json()
     overlapping_features = []
+    all_features = []
+    
+    # Get protein length
+    protein_length = data.get("sequence", {}).get("length", 0)
     
     for feature in data.get("features", []):
         ftype = feature.get("type", "").strip()
@@ -84,14 +90,19 @@ def get_features_detailed(uniprot_id: str, start: int, end: int) -> dict:
         fstart = int(loc.get("start", {}).get("value", -1))
         fend = int(loc.get("end", {}).get("value", -1))
         
+        feature_dict = {
+            "type": ftype,
+            "description": feature.get("description", "").strip(),
+            "start": fstart,
+            "end": fend
+        }
+        
+        # Add to all features
+        all_features.append(feature_dict)
+        
         # Check overlap with user region
         if not (fend < start or fstart > end):
-            overlapping_features.append({
-                "type": ftype,
-                "description": feature.get("description", "").strip(),
-                "start": fstart,
-                "end": fend
-            })
+            overlapping_features.append(feature_dict)
     
     # Extract protein name
     protein_name = "Unknown"
@@ -105,8 +116,10 @@ def get_features_detailed(uniprot_id: str, start: int, end: int) -> dict:
     return {
         "uniprot_id": uniprot_id,
         "protein_name": protein_name,
+        "protein_length": protein_length,
         "region": f"{start}-{end}",
-        "features": overlapping_features
+        "features": overlapping_features,
+        "all_features": all_features
     }
 
 # =============================================================================
@@ -158,6 +171,16 @@ app_ui = ui.page_fluid(
             ),
             ui.nav_panel(
                 "Visualization",
+                ui.input_radio_buttons(
+                    "plot_mode",
+                    "View mode:",
+                    choices={
+                        "region": "Queried region only",
+                        "full": "Full protein length"
+                    },
+                    selected="region",
+                    inline=True
+                ),
                 ui.output_ui("plot")
             ),
             ui.nav_panel(
@@ -293,13 +316,26 @@ def server(input, output, session):
                 ui.p(f"Error: {data['error']}", class_="text-danger")
             )
         
-        if not data["features"]:
-            return ui.div(
-                ui.p(f"No features to visualize in region {data['region']}", class_="text-muted")
-            )
+        plot_mode = input.plot_mode()
+        
+        # Choose which features to display
+        if plot_mode == "full":
+            features_to_plot = data.get("all_features", [])
+            title_suffix = "Full Protein"
+            if not features_to_plot:
+                return ui.div(
+                    ui.p("No features available for visualization", class_="text-muted")
+                )
+        else:
+            features_to_plot = data["features"]
+            title_suffix = f"Region {data['region']}"
+            if not features_to_plot:
+                return ui.div(
+                    ui.p(f"No features to visualize in region {data['region']}", class_="text-muted")
+                )
         
         # Create the plot
-        fig, ax = plt.subplots(figsize=(12, max(6, len(data["features"]) * 0.5)))
+        fig, ax = plt.subplots(figsize=(14, max(6, len(features_to_plot) * 0.4)))
         
         # Define colors for different feature types
         color_map = {
@@ -316,18 +352,36 @@ def server(input, output, session):
             "Transmembrane": "#95a5a6",
             "Signal peptide": "#d35400",
             "Propeptide": "#c0392b",
+            "Coiled coil": "#8e44ad",
+            "Compositional bias": "#16a085",
+            "Disulfide bond": "#d35400",
+            "Chain": "#2c3e50",
         }
         default_color = "#7f8c8d"
         
-        # Get protein sequence length (estimate from max feature end)
-        max_pos = max([f["end"] for f in data["features"]] + [int(data["region"].split("-")[1])])
+        # Determine x-axis limits
+        if plot_mode == "full":
+            max_pos = data.get("protein_length", 1000)
+            min_pos = 0
+        else:
+            region_parts = data["region"].split("-")
+            query_start = int(region_parts[0])
+            query_end = int(region_parts[1])
+            # Add some padding around the region
+            padding = int((query_end - query_start) * 0.2)
+            min_pos = max(0, query_start - padding)
+            max_pos = query_end + padding
+        
+        # Draw protein backbone
+        ax.barh(-1, max_pos, left=0, height=0.3, 
+               color='lightgray', edgecolor='black', linewidth=1, alpha=0.5, label='Protein backbone')
         
         # Plot each feature as a horizontal bar
         y_pos = 0
         labels = []
         colors_used = {}
         
-        for feature in sorted(data["features"], key=lambda x: x["start"]):
+        for feature in sorted(features_to_plot, key=lambda x: x["start"]):
             ftype = feature["type"]
             color = color_map.get(ftype, default_color)
             colors_used[ftype] = color
@@ -342,8 +396,8 @@ def server(input, output, session):
             
             # Label
             label = feature["description"] if feature["description"] else ftype
-            if len(label) > 30:
-                label = label[:27] + "..."
+            if len(label) > 35:
+                label = label[:32] + "..."
             labels.append(f"{label} ({start}-{end})")
             
             y_pos += 1
@@ -352,40 +406,43 @@ def server(input, output, session):
         region_parts = data["region"].split("-")
         query_start = int(region_parts[0])
         query_end = int(region_parts[1])
-        ax.axvspan(query_start, query_end, alpha=0.15, color='red', zorder=-1)
+        ax.axvspan(query_start, query_end, alpha=0.2, color='red', zorder=-1, label='Queried region')
         
         # Formatting
-        ax.set_yticks(range(len(labels)))
-        ax.set_yticklabels(labels)
+        all_labels = ['Protein'] + labels
+        ax.set_yticks(range(-1, len(labels)))
+        ax.set_yticklabels(all_labels, fontsize=9)
         ax.set_xlabel("Amino Acid Position", fontsize=12, fontweight='bold')
         ax.set_ylabel("Features", fontsize=12, fontweight='bold')
-        ax.set_title(f"{data['protein_name']} - Feature Map", fontsize=14, fontweight='bold', pad=20)
-        ax.set_xlim(0, max_pos + 10)
+        ax.set_title(f"{data['protein_name']} ({data['uniprot_id']}) - {title_suffix}\nProtein length: {data.get('protein_length', 'unknown')} aa", 
+                    fontsize=13, fontweight='bold', pad=15)
+        ax.set_xlim(min_pos, max_pos)
         ax.grid(axis='x', alpha=0.3, linestyle='--')
         
         # Add legend for feature types
         legend_patches = [mpatches.Patch(color=color, label=ftype, alpha=0.7) 
                          for ftype, color in sorted(colors_used.items())]
-        legend_patches.append(mpatches.Patch(color='red', alpha=0.15, label='Queried Region'))
         ax.legend(handles=legend_patches, loc='center left', bbox_to_anchor=(1, 0.5), 
-                 frameon=True, fancybox=True, shadow=True)
+                 frameon=True, fancybox=True, shadow=True, fontsize=9)
         
         plt.tight_layout()
         
         # Convert plot to image
         buf = BytesIO()
-        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        plt.savefig(buf, format='png', dpi=120, bbox_inches='tight')
         buf.seek(0)
         img_base64 = base64.b64encode(buf.read()).decode()
         plt.close(fig)
         
+        mode_text = "full protein" if plot_mode == "full" else f"region {data['region']}"
+        
         return ui.div(
             ui.h5(f"Feature Map: {data['protein_name']}"),
-            ui.p(f"Queried region: {data['region']} (highlighted in red)", class_="text-muted"),
+            ui.p(f"Showing {mode_text} | Queried region: {data['region']} (highlighted in red)", class_="text-muted"),
             ui.HTML(f'<img src="data:image/png;base64,{img_base64}" style="max-width: 100%; height: auto;">'),
             style="padding: 10px;"
         )
-
+    
 app = App(app_ui, server)
 
 if __name__ == "__main__":
