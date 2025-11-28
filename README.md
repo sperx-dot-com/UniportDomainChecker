@@ -21,7 +21,7 @@ pip install shiny requests
 Run the application:
 
 ```bash
-shiny run uniprot_app.py
+python uniprot_app.py
 ```
 
 Then open your browser to `http://127.0.0.1:8000`
